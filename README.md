@@ -38,7 +38,7 @@ connection = create_connection()
 # Example usage of each function
 ```
 
-### ### Functions
+### Functions
 
 #### `create_connection()`
 
