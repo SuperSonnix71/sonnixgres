@@ -1,0 +1,16 @@
+[tool.poetry]
+name = "sonnixgres"
+homepage = "https://github.com/SuperSonnix71/sonnixgres"
+version = "0.1.3"
+description = "A Python module for simplifying interactions with PostgreSQL databases, with rich console output for better readability and debugging."
+authors = ["Sonny Mir <sonnym@hotmail.se>"]
+license = "BSD License"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
