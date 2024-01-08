@@ -14,7 +14,7 @@ pip install sonnixgres
 
 First, ensure that your PostgreSQL credentials are set as environment variables. 
 
-Create a `.env ` file in your CDW with the following database enviornment  variables:
+Create a `.env ` file in your CWD with the following database enviornment  variables:
 
 ```parameters
 DB_HOST=your_database_host
