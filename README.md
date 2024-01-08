@@ -114,9 +114,9 @@ Displays a pandas DataFrame as a table in the console, with an internal row limi
 
 - Finally, the table is printed to the console using the `Console` object.
   
-  ![](/home/sonny/.var/app/com.github.marktext.marktext/config/marktext/images/2024-01-08-17-43-34-Screenshot%20from%202024-01-08%2017-17-55.png)
-
-## License
+  ![](/home/sonny/Pictures/Screenshots/Screenshot%20from%202024-01-08%2017-17-55.png)
+  
+  ## License
 
 **BSD License**
 
