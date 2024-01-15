@@ -1,4 +1,4 @@
-![](/home/sonny/Github/sonnixgres/icon.png)
+![](icon.png)
 
 # sonnixgres
 
