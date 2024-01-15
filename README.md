@@ -1,4 +1,4 @@
-![Alt text](/home/sonny/Pictures/Screenshots/Screenshot%20from%202024-01-15%2010-11-38.png)
+![](/home/sonny/Github/sonnixgres/icon.png)
 
 # sonnixgres
 
