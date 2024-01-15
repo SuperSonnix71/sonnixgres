@@ -1,5 +1,4 @@
 ![](icon.png)
-
 # sonnixgres
 
 A Python module for simplifying interactions with PostgreSQL databases, with rich console output for better readability and debugging.
