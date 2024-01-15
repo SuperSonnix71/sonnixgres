@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "sonnixgres"
 homepage = "https://github.com/SuperSonnix71/sonnixgres"
-version = "0.1.4"
+version = "0.1.5"
 description = "A Python module for simplifying interactions with PostgreSQL databases, with rich console output for better readability and debugging."
 authors = ["Sonny Mir <sonnym@hotmail.se>"]
 license = "BSD License"
