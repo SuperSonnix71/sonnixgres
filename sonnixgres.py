@@ -2,13 +2,15 @@ import os
 import logging
 import warnings
 from dotenv import load_dotenv
+from sqlalchemy import create_engine, MetaData
 import pandas as pd
 import psycopg2
 from psycopg2.extensions import AsIs
 from rich.console import Console
 from rich.logging import RichHandler
 from rich.table import Table
-
+import threading
+import pickle
 # Load environment variables
 load_dotenv()
 
@@ -46,7 +48,57 @@ class PostgresCredentials:
         self.password = os.getenv('DB_PASSWORD')
         self.port = int(os.getenv('DB_PORT', 5432))
         self.schema = os.getenv('DB_SCHEMA', '')
-        self.table = os.getenv('DB_TABLE', '')
+        self.tables = os.getenv('DB_TABLES', '').split(',')
+        
+def create_sqlalchemy_engine():
+    credentials = PostgresCredentials()
+    db_url = f"postgresql+psycopg2://{credentials.user}:{credentials.password}@{credentials.host}:{credentials.port}/{credentials.database}"
+    return create_engine(db_url)
+
+class MetadataCache:
+    def __init__(self, schema, tables):
+        self.schema = schema
+        self.tables = tables
+        self.engine = create_sqlalchemy_engine()
+        self.metadata_cache = None
+        self.lock = threading.Lock()
+
+    def format_column_details(self, column):
+        details = f'Column: {column.name}, Type: {column.type}'
+        if column.primary_key:
+            details += ' (Primary Key)'
+        return details
+
+    def format_table_metadata(self, table_obj):
+        table_details = f'Table Name: {table_obj.name}\n'
+        table_details += '\n'.join([self.format_column_details(column) for column in table_obj.columns])
+        return table_details
+
+    def refresh_metadata_cache(self):
+        with self.lock:
+            try:
+                metadata = MetaData()
+                for table in self.tables:
+                    metadata.reflect(bind=self.engine, only=[table], schema=self.schema)
+                
+                self.metadata_cache = metadata
+                logger.info("Metadata cache refreshed.")
+
+            except Exception as e:
+                logger.error(f"Error refreshing metadata cache: {e}")
+
+    def display_metadata(self):
+        if not self.metadata_cache:
+            logger.info("Metadata cache is empty. Please refresh it first.")
+            return
+
+        for table_name in self.metadata_cache.tables:
+            table = self.metadata_cache.tables[table_name]
+            logger.info(f"\nMetadata for Table: {table_name}")
+            for column in table.columns:
+                logger.info(self.format_column_details(column))        
+        
+        
 
 class ConnectionError(Exception):
     """Exception raised when connection to database fails."""
@@ -157,10 +209,6 @@ def populate_table(connection, table_name, dataframe):
     except (Exception, psycopg2.DatabaseError) as error:
         logger.error(f"Error in populating table: {error}")
         raise
-
-
-
-
 
 def update_records(connection: psycopg2.connect, update_query: str, 
                    params: tuple | None = None, close_connection: bool = True) -> None:
