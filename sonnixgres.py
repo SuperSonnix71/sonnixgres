@@ -2,7 +2,7 @@ import os
 import logging
 import warnings
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, MetaData
+from sqlalchemy import create_engine, MetaData, inspect
 import pandas as pd
 import psycopg2
 from psycopg2.extensions import AsIs
@@ -86,6 +86,22 @@ class MetadataCache:
 
             except Exception as e:
                 logger.error(f"Error refreshing metadata cache: {e}")
+                
+    def retrieve_columns_info(self):
+        columns_info = {}  # Use a dictionary to structure information by table
+        with self.lock:
+            try:
+                inspector = inspect(self.engine)
+                for table_name in self.tables:
+                    full_table_name = f"{self.schema}.{table_name}" if self.schema else table_name
+                    columns_detail = inspector.get_columns(table_name, schema=self.schema)
+                    columns = [f"{col['name']} ({col['type']})" for col in columns_detail]
+                    logger.info(f"Columns in {full_table_name}: {', '.join(columns)}")
+                    columns_info[full_table_name] = columns
+            except Exception as e:
+                logger.error(f"Error retrieving columns info: {e}")
+        return columns_info
+
 
     def display_metadata(self):
         if not self.metadata_cache:
