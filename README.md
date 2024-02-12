@@ -13,9 +13,8 @@ pip install sonnixgres
 
 # Usage
 
-First, ensure that your PostgreSQL credentials are set as environment variables. 
-
-Create a `.env ` file in your CWD with the following database enviornment  variables:
+Ensure your PostgreSQL credentials are set as environment variables.
+Create a .env file in your current working directory (CWD) with the following database environment variables:
 
 ```parameters
 DB_HOST=your_database_host
@@ -100,6 +99,11 @@ Displays a pandas DataFrame as a table in the console, with an internal row limi
 
 - `dataframe`: The pandas DataFrame to be displayed.
 - `max_column_width`: Optional maximum width for each column in the table, defaulting to 50 characters.rows displayed.
+
+#### `MetadataCache(schema, tables)`
+Initializes a cache for database metadata.
+- `schema`: The database schema to be used.
+- `tables`: A list of table names to be cached.
 
 ## Behavior
 

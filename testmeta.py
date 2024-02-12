@@ -20,11 +20,11 @@ def test_query_and_display():
 
     # Define SQL query
     query = """
-    SELECT application, SUM(total_minutes) as total_usage
-    FROM ai.underutilized_users_ams
-    GROUP BY application
-    ORDER BY total_usage DESC
-    LIMIT 10;
+SELECT manufacturer, SUM(active_minutes) AS total_active_minutes, AVG(price) AS avg_price
+FROM ai.underutilized_users_ams
+GROUP BY manufacturer
+ORDER BY avg_price DESC, total_active_minutes DESC
+LIMIT 10;
     """
 
     # Execute the query
