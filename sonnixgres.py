@@ -64,17 +64,33 @@ class MetadataCache:
         self.lock = threading.Lock()
 
     def format_column_details(self, column):
-        details = f'Column: {column.name}, Type: {column.type}'
+        # Mapping SQLAlchemy types to SQL types
+        sql_type_mapping = {
+            'INTEGER': 'INT',
+            'BIGINT': 'BIGINT',
+            'TEXT': 'VARCHAR(255)',
+            'BOOLEAN': 'BOOLEAN',
+            'DATE': 'DATE',
+            'FLOAT': 'FLOAT',
+            'DOUBLE': 'DOUBLE PRECISION',
+            'SERIAL': 'SERIAL'
+        }
+        # Default to VARCHAR(255) if type not in mapping
+        sql_type = sql_type_mapping.get(str(column.type), 'VARCHAR(255)')
+        # Format column details for SQL
+        details = f"{column.name} {sql_type}"
         if column.primary_key:
-            details += ' (Primary Key)'
+            details += " PRIMARY KEY"
         return details
 
     def format_table_metadata(self, table_obj):
+        # Formats the metadata of a table for display
         table_details = f'Table Name: {table_obj.name}\n'
         table_details += '\n'.join([self.format_column_details(column) for column in table_obj.columns])
         return table_details
 
     def refresh_metadata_cache(self):
+        # Refreshes the metadata cache by reflecting the database schema
         with self.lock:
             try:
                 metadata = MetaData()
@@ -94,9 +110,9 @@ class MetadataCache:
 
         for table_name in self.metadata_cache.tables:
             table = self.metadata_cache.tables[table_name]
-            logger.info(f"\nMetadata for Table: {table_name}")
-            for column in table.columns:
-                logger.info(self.format_column_details(column))        
+            column_definitions = [self.format_column_details(column) for column in table.columns]
+            create_table_statement = f"CREATE TABLE {table_name} (\n    " + ",\n    ".join(column_definitions) + "\n);"
+            logger.info(create_table_statement)      
         
         
 
