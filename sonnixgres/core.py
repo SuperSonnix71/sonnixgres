@@ -1,7 +1,3 @@
-from .utils import sanitize_sql_identifier, validate_connection_params, validate_query_params, parse_table_list
-
-load_dotenv()
-
 DEFAULT_DISPLAY_LIMIT = 50
 VALID_LOG_LEVELS = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']
 DEFAULT_DB_PORT = 5432
