@@ -1,49 +1,85 @@
-def populate_table(connection: connection, table_name: str, dataframe: pd.DataFrame, batch_size: int = 1000) -> None:
-    if dataframe.empty:
-        raise ValueError("DataFrame cannot be empty")
+import os
+import logging
+import threading
+import time
+from functools import lru_cache
+from typing import Optional, List, Dict, Any, Union, Tuple
+from contextlib import contextmanager
+from dataclasses import dataclass
 
-    if batch_size <= 0:
-        raise ValueError("Batch size must be positive")
+from dotenv import load_dotenv
+from sqlalchemy import create_engine, MetaData, inspect
+from sqlalchemy.pool import QueuePool
+import pandas as pd
+import psycopg2
+from psycopg2.extensions import AsIs, connection
+from rich.console import Console
+from rich.logging import RichHandler
+from rich.table import Table
 
-    sanitized_table = sanitize_sql_identifier(table_name)
-    total_rows = len(dataframe)
+from .utils import sanitize_sql_identifier, validate_connection_params, validate_query_params, parse_table_list
 
-    try:
-        with connection.cursor() as cursor:
-            # Infer appropriate PostgreSQL types for each column
-            for col in dataframe.columns:
-                sanitized_col = sanitize_sql_identifier(col)
-                # Get sample values for smarter type inference
-                sample_values = dataframe[col].dropna().head(10).tolist() if len(dataframe) > 0 else None
-                postgres_type = _infer_postgresql_type(str(dataframe[col].dtype), sample_values)
+load_dotenv()
 
-                alter_query = "ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s %s"
-                cursor.execute(alter_query, (AsIs(sanitized_table), AsIs(sanitized_col), postgres_type))
+DEFAULT_DISPLAY_LIMIT = 50
+VALID_LOG_LEVELS = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']
+DEFAULT_DB_PORT = 5432
+DEFAULT_CACHE_TTL = 300  # 5 minutes
 
-            columns = [sanitize_sql_identifier(col) for col in dataframe.columns]
-            insert_columns = ', '.join(columns)
-            placeholders = ', '.join(['%s'] * len(columns))
-            insert_query = f"INSERT INTO {AsIs(sanitized_table)} ({insert_columns}) VALUES ({placeholders})"
 
-            data_values = dataframe.values.tolist()
-            inserted_rows = 0
+@dataclass
+class QueryResult:
+    """Cached query result with metadata."""
+    dataframe: pd.DataFrame
+    timestamp: float
+    ttl: int
 
-            # Use batching for large datasets
-            for i in range(0, len(data_values), batch_size):
-                batch = data_values[i:i + batch_size]
-                cursor.executemany(insert_query, batch)
-                inserted_rows += len(batch)
+    def is_expired(self) -> bool:
+        return time.time() - self.timestamp > self.ttl
 
-                # Log progress for large inserts
-                if total_rows > 10000 and (i + batch_size) % 10000 == 0:
-                    progress = min(i + batch_size, total_rows)
-                    logger.info(f"Inserted {progress}/{total_rows} rows ({progress/total_rows*100:.1f}%)")
 
-            connection.commit()
+class QueryCache:
+    """Simple in-memory query result cache with TTL."""
 
-        logger.info(f"Successfully inserted {total_rows} rows into table '{sanitized_table}' using {len(columns)} columns")
+    def __init__(self, max_size: int = 100):
+        self._cache: Dict[str, QueryResult] = {}
+        self._max_size = max_size
+        self._lock = threading.Lock()
 
-    except psycopg2.DatabaseError as e:
-        connection.rollback()
-        logger.error(f"Failed to populate table '{sanitized_table}': {e}")
-        raise
+    def _make_key(self, query: str, params: Optional[Tuple]) -> str:
+        """Create cache key from query and parameters."""
+        param_str = str(params) if params else ""
+        return f"{query}:{param_str}"
+
+    def get(self, query: str, params: Optional[Tuple]) -> Optional[pd.DataFrame]:
+        """Get cached result if available and not expired."""
+        key = self._make_key(query, params)
+
+        with self._lock:
+            if key in self._cache:
+                result = self._cache[key]
+                if not result.is_expired():
+                    logger.debug(f"Cache hit for query: {query[:50]}...")
+                    return result.dataframe
+                else:
+                    # Remove expired entry
+                    del self._cache[key]
+
+        return None
+
+    def set(self, query: str, params: Optional[Tuple], dataframe: pd.DataFrame, ttl: int = DEFAULT_CACHE_TTL) -> None:
+        """Cache query result with TTL."""
+        key = self._make_key(query, params)
+
+        with self._lock:
+            # Remove oldest entries if cache is full
+            if len(self._cache) >= self._max_size:
+                oldest_key = min(self._cache.keys(), key=lambda k: self._cache[k].timestamp)
+                del self._cache[oldest_key]
+
+            self._cache[key] = QueryResult(dataframe, time.time(), ttl)
+            logger.debug(f"Cached result for query: {query[:50]}...")
+
+
+# Global query cache instance
+_query_cache = QueryCache()
