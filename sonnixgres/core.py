@@ -17,10 +17,35 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.pool import QueuePool
 from sqlalchemy.orm import sessionmaker
 
-from .utils import sanitize_sql_identifier, validate_connection_params, parse_table_list, validate_query_params
-
-# Configure logging
-logger = logging.getLogger(__name__)
+from .exceptions import (
+    SonnixgresError,
+    ConnectionError,
+    AuthenticationError,
+    ConnectionTimeoutError,
+    ConnectionPoolExhaustedError,
+    QueryError,
+    QuerySyntaxError,
+    QueryTimeoutError,
+    DataError,
+    TableError,
+    TableNotFoundError,
+    ColumnError,
+    PermissionError,
+    TransactionError,
+    ValidationError,
+    ResourceError,
+    ResourceExhaustedError
+)
+from .logging_config import logger, log_error, log_performance, log_query
+from .validation import (
+    validate_connection_params,
+    validate_query_params,
+    validate_table_name,
+    validate_dataframe,
+    validate_pagination_params,
+    validate_cache_params
+)
+from .utils import sanitize_sql_identifier, parse_table_list
 
 # Global connection pool
 _connection_pool = None
@@ -61,7 +86,7 @@ class PostgresCredentials:
 
         # Validate required credentials
         if not all([self.host, self.database, self.user, self.password]):
-            raise ValueError("Missing required database credentials: DB_HOST, DB_DATABASE, DB_USER, DB_PASSWORD")
+            raise ValidationError("Missing required database credentials: DB_HOST, DB_DATABASE, DB_USER, DB_PASSWORD")
 
         validate_connection_params(self.host, self.database, self.user)
 
@@ -145,12 +170,7 @@ class QueryCache:
 _query_cache = QueryCache()
 
 
-class ConnectionError(Exception):
-    """Custom exception for connection-related errors."""
-    pass
-
-
-def create_connection() -> psycopg2.connect:
+def create_connection():
     """
     Create a new PostgreSQL database connection using environment variables.
 
@@ -160,6 +180,8 @@ def create_connection() -> psycopg2.connect:
     Raises:
         ConnectionError: If connection fails
     """
+    start_time = time.time()
+
     try:
         pool = _get_connection_pool()
         conn = pool.getconn()
@@ -171,11 +193,23 @@ def create_connection() -> psycopg2.connect:
                 cursor.execute("SET search_path TO %s", (creds.schema,))
 
         logger.debug("Database connection created successfully")
+        log_performance("create_connection", time.time() - start_time)
         return conn
 
+    except psycopg2.OperationalError as e:
+        log_error(e, "create_connection")
+        if "authentication failed" in str(e).lower():
+            raise AuthenticationError(f"Database authentication failed: {e}") from e
+        elif "timeout" in str(e).lower():
+            raise ConnectionTimeoutError(f"Database connection timeout: {e}") from e
+        else:
+            raise ConnectionError(f"Failed to connect to database: {e}") from e
+    except psycopg2.pool.PoolError as e:
+        log_error(e, "create_connection")
+        raise ConnectionPoolExhaustedError(f"Connection pool exhausted: {e}") from e
     except Exception as e:
-        logger.error(f"Failed to create database connection: {e}")
-        raise ConnectionError(f"Failed to connect to database: {e}")
+        log_error(e, "create_connection")
+        raise SonnixgresError(f"Unexpected error creating database connection: {e}") from e
 
 
 @contextmanager
@@ -201,7 +235,7 @@ def get_connection():
 
 
 def query_database(
-    connection: psycopg2.connect,
+    connection,
     query: str,
     params: Optional[tuple] = None,
     close_connection: bool = True,
@@ -226,12 +260,18 @@ def query_database(
     Returns:
         pandas DataFrame with query results
     """
+    start_time = time.time()
+
+    # Validate inputs
     if not connection:
         raise ConnectionError("No database connection provided")
-
     validate_query_params(query, params)
+    validate_pagination_params(limit, offset)
+    if use_cache:
+        validate_cache_params(use_cache, cache_ttl)
 
     # Modify query for pagination if requested
+    original_query = query
     if limit is not None or offset is not None:
         if 'LIMIT' in query.upper() or 'OFFSET' in query.upper():
             logger.warning("Query already contains LIMIT/OFFSET, pagination parameters ignored")
@@ -245,26 +285,39 @@ def query_database(
     if use_cache:
         cached_result = _query_cache.get(query, params)
         if cached_result is not None:
+            log_performance("query_database", time.time() - start_time, cached=True)
             return cached_result
-
-    start_time = time.time()
 
     try:
         df = pd.read_sql(query, connection, params=params)
         execution_time = time.time() - start_time
 
         logger.info(f"Query executed successfully, returned {len(df)} rows in {execution_time:.3f}s")
+        log_query(query, params, execution_time)
 
         # Cache result if enabled
         if use_cache:
             _query_cache.set(query, params, df, cache_ttl)
 
+        log_performance("query_database", execution_time, rows_returned=len(df))
         return df
 
-    except psycopg2.DatabaseError as e:
+    except psycopg2.ProgrammingError as e:
         execution_time = time.time() - start_time
-        logger.error(f"Query execution failed after {execution_time:.3f}s: {e}")
-        raise
+        log_error(e, "query_database", execution_time=execution_time)
+        raise QuerySyntaxError(f"SQL syntax error in query: {e}") from e
+    except psycopg2.OperationalError as e:
+        execution_time = time.time() - start_time
+        log_error(e, "query_database", execution_time=execution_time)
+        raise ConnectionError(f"Connection error during query execution: {e}") from e
+    except psycopg2.DataError as e:
+        execution_time = time.time() - start_time
+        log_error(e, "query_database", execution_time=execution_time)
+        raise DataError(f"Data error in query execution: {e}") from e
+    except Exception as e:
+        execution_time = time.time() - start_time
+        log_error(e, "query_database", execution_time=execution_time)
+        raise SonnixgresError(f"Unexpected error during query execution: {e}") from e
     finally:
         if close_connection:
             try:
@@ -276,7 +329,7 @@ def query_database(
 
 
 def query_database_streaming(
-    connection: psycopg2.connect,
+    connection,
     query: str,
     params: Optional[tuple] = None,
     chunk_size: int = 1000
@@ -293,9 +346,11 @@ def query_database_streaming(
     Yields:
         pandas DataFrame chunks
     """
+    start_time = time.time()
+
+    # Validate inputs
     if not connection:
         raise ConnectionError("No database connection provided")
-
     validate_query_params(query, params)
 
     try:
@@ -314,9 +369,17 @@ def query_database_streaming(
             if chunk:
                 yield pd.DataFrame(chunk, columns=columns)
 
-    except psycopg2.DatabaseError as e:
-        logger.error(f"Streaming query execution failed: {e}")
-        raise
+        log_performance("query_database_streaming", time.time() - start_time)
+
+    except psycopg2.ProgrammingError as e:
+        log_error(e, "query_database_streaming")
+        raise QuerySyntaxError(f"SQL syntax error in streaming query: {e}") from e
+    except psycopg2.OperationalError as e:
+        log_error(e, "query_database_streaming")
+        raise ConnectionError(f"Connection error during streaming query: {e}") from e
+    except Exception as e:
+        log_error(e, "query_database_streaming")
+        raise SonnixgresError(f"Unexpected error during streaming query: {e}") from e
 
 
 def save_results_to_csv(dataframe: pd.DataFrame, filename: str, **kwargs) -> None:
@@ -328,22 +391,31 @@ def save_results_to_csv(dataframe: pd.DataFrame, filename: str, **kwargs) -> Non
         filename: Output filename
         **kwargs: Additional pandas to_csv arguments
     """
+    start_time = time.time()
+
+    # Validate inputs
     if not filename or not filename.strip():
-        raise ValueError("Filename cannot be empty")
+        raise ValidationError("Filename cannot be empty")
 
     if dataframe.empty:
         logger.warning("Attempting to save empty DataFrame")
         return
 
-    default_kwargs = {
-        'index': False,
-        'encoding': 'utf-8',
-        'float_format': '%.6f'
-    }
-    default_kwargs.update(kwargs)
+    try:
+        default_kwargs = {
+            'index': False,
+            'encoding': 'utf-8',
+            'float_format': '%.6f'
+        }
+        default_kwargs.update(kwargs)
 
-    dataframe.to_csv(filename, **default_kwargs)
-    logger.info(f"DataFrame saved to {filename} ({len(dataframe)} rows)")
+        dataframe.to_csv(filename, **default_kwargs)
+        logger.info(f"DataFrame saved to {filename} ({len(dataframe)} rows)")
+        log_performance("save_results_to_csv", time.time() - start_time, rows_saved=len(dataframe))
+
+    except Exception as e:
+        log_error(e, "save_results_to_csv", filename=filename)
+        raise SonnixgresError(f"Error saving DataFrame to CSV: {e}") from e
 
 
 def display_results_as_table(
@@ -399,7 +471,7 @@ def _infer_sql_type(dtype: str) -> str:
     return DTYPE_TO_SQL.get(dtype, 'TEXT')
 
 
-def create_table(connection: psycopg2.connect, table_name: str) -> None:
+def create_table(connection, table_name: str) -> None:
     """
     Create a new table with optimized structure.
 
@@ -407,6 +479,11 @@ def create_table(connection: psycopg2.connect, table_name: str) -> None:
         connection: Database connection
         table_name: Name of table to create
     """
+    start_time = time.time()
+
+    # Validate inputs
+    validate_table_name(table_name)
+
     sanitized_table = sanitize_sql_identifier(table_name)
 
     try:
@@ -415,12 +492,26 @@ def create_table(connection: psycopg2.connect, table_name: str) -> None:
             cursor.execute(create_table_query)
             connection.commit()
             logger.info(f"Table '{sanitized_table}' created successfully")
-    except (Exception, psycopg2.DatabaseError) as error:
-        logger.error(f"Error creating table: {error}")
-        raise
+
+        log_performance("create_table", time.time() - start_time, table_name=sanitized_table)
+
+    except psycopg2.errors.DuplicateTable:
+        logger.warning(f"Table '{sanitized_table}' already exists")
+    except psycopg2.ProgrammingError as e:
+        connection.rollback()
+        log_error(e, "create_table", table_name=sanitized_table)
+        raise QuerySyntaxError(f"SQL syntax error creating table: {e}") from e
+    except psycopg2.OperationalError as e:
+        connection.rollback()
+        log_error(e, "create_table", table_name=sanitized_table)
+        raise ConnectionError(f"Connection error creating table: {e}") from e
+    except Exception as e:
+        connection.rollback()
+        log_error(e, "create_table", table_name=sanitized_table)
+        raise SonnixgresError(f"Unexpected error creating table: {e}") from e
 
 
-def populate_table(connection: psycopg2.connect, table_name: str, dataframe: pd.DataFrame) -> None:
+def populate_table(connection, table_name: str, dataframe: pd.DataFrame) -> None:
     """
     Populate a table with data from a DataFrame using optimized data types.
 
@@ -429,8 +520,11 @@ def populate_table(connection: psycopg2.connect, table_name: str, dataframe: pd.
         table_name: Target table name
         dataframe: DataFrame to insert
     """
-    if dataframe.empty:
-        raise ValueError("DataFrame cannot be empty")
+    start_time = time.time()
+
+    # Validate inputs
+    validate_table_name(table_name)
+    validate_dataframe(dataframe, "populate_table")
 
     sanitized_table = sanitize_sql_identifier(table_name)
     sanitized_columns = [sanitize_sql_identifier(col) for col in dataframe.columns]
@@ -445,7 +539,9 @@ def populate_table(connection: psycopg2.connect, table_name: str, dataframe: pd.
 
             # Insert data in batches for better performance
             batch_size = 1000
-            for i in range(0, len(dataframe), batch_size):
+            total_rows = len(dataframe)
+
+            for i in range(0, total_rows, batch_size):
                 batch_df = dataframe.iloc[i:i+batch_size]
                 insert_columns = ', '.join(sanitized_columns)
                 insert_values = ', '.join(['%s'] * len(sanitized_columns))
@@ -453,16 +549,35 @@ def populate_table(connection: psycopg2.connect, table_name: str, dataframe: pd.
                 cursor.executemany(insert_query, batch_df.values.tolist())
 
             connection.commit()
-            logger.info(f"Data inserted into table '{sanitized_table}' successfully ({len(dataframe)} rows)")
+            logger.info(f"Data inserted into table '{sanitized_table}' successfully ({total_rows} rows)")
 
-    except (Exception, psycopg2.DatabaseError) as error:
+        log_performance("populate_table", time.time() - start_time,
+                       table_name=sanitized_table, rows_inserted=total_rows)
+
+    except psycopg2.errors.UndefinedTable as e:
         connection.rollback()
-        logger.error(f"Error populating table: {error}")
-        raise
+        log_error(e, "populate_table", table_name=sanitized_table)
+        raise TableNotFoundError(f"Table '{table_name}' does not exist") from e
+    except psycopg2.ProgrammingError as e:
+        connection.rollback()
+        log_error(e, "populate_table", table_name=sanitized_table)
+        raise QuerySyntaxError(f"SQL syntax error populating table: {e}") from e
+    except psycopg2.OperationalError as e:
+        connection.rollback()
+        log_error(e, "populate_table", table_name=sanitized_table)
+        raise ConnectionError(f"Connection error populating table: {e}") from e
+    except psycopg2.DataError as e:
+        connection.rollback()
+        log_error(e, "populate_table", table_name=sanitized_table)
+        raise DataError(f"Data error populating table: {e}") from e
+    except Exception as e:
+        connection.rollback()
+        log_error(e, "populate_table", table_name=sanitized_table)
+        raise SonnixgresError(f"Unexpected error populating table: {e}") from e
 
 
 def update_records(
-    connection: psycopg2.connect,
+    connection,
     update_query: str,
     params: Optional[tuple] = None,
     close_connection: bool = True
@@ -476,18 +591,37 @@ def update_records(
         params: Query parameters
         close_connection: Whether to return connection to pool
     """
+    start_time = time.time()
+
+    # Validate inputs
     if not connection:
         raise ConnectionError("No connection to database")
+    validate_query_params(update_query, params)
 
     try:
         with connection.cursor() as cursor:
             cursor.execute(update_query, params)
             connection.commit()
             logger.info("Update query executed successfully")
-    except (Exception, psycopg2.DatabaseError) as error:
+
+        log_performance("update_records", time.time() - start_time)
+
+    except psycopg2.errors.UndefinedTable as e:
         connection.rollback()
-        logger.error(f"Update query execution error: {error}")
-        raise
+        log_error(e, "update_records")
+        raise TableNotFoundError(f"Table referenced in update query does not exist: {e}") from e
+    except psycopg2.ProgrammingError as e:
+        connection.rollback()
+        log_error(e, "update_records")
+        raise QuerySyntaxError(f"SQL syntax error in update query: {e}") from e
+    except psycopg2.OperationalError as e:
+        connection.rollback()
+        log_error(e, "update_records")
+        raise ConnectionError(f"Connection error during update: {e}") from e
+    except Exception as e:
+        connection.rollback()
+        log_error(e, "update_records")
+        raise TransactionError(f"Transaction failed during update: {e}") from e
     finally:
         if close_connection:
             try:
@@ -495,11 +629,11 @@ def update_records(
                 pool.putconn(connection)
                 logger.debug("Database connection returned to pool")
             except Exception as e:
-                logger.error(f"Error returning connection to pool: {e}")
+                logger.warning(f"Error returning connection to pool: {e}")
 
 
 def create_view(
-    connection: psycopg2.connect,
+    connection,
     view_name: str,
     view_query: str,
     close_connection: bool = True
@@ -513,11 +647,14 @@ def create_view(
         view_query: SQL query for the view
         close_connection: Whether to return connection to pool
     """
+    start_time = time.time()
+
+    # Validate inputs
     if not connection:
         raise ConnectionError("No database connection provided")
-
+    validate_table_name(view_name)  # Views use same naming rules as tables
     if not view_query or not view_query.strip():
-        raise ValueError("View query cannot be empty")
+        raise ValidationError("View query cannot be empty")
 
     sanitized_view = sanitize_sql_identifier(view_name)
 
@@ -527,10 +664,27 @@ def create_view(
             cursor.execute(create_view_query)
             connection.commit()
             logger.info(f"View '{sanitized_view}' created successfully")
-    except (Exception, psycopg2.DatabaseError) as error:
+
+        log_performance("create_view", time.time() - start_time, view_name=sanitized_view)
+
+    except psycopg2.errors.DuplicateTable as e:
+        logger.warning(f"View '{sanitized_view}' already exists and was replaced")
+    except psycopg2.errors.UndefinedTable as e:
         connection.rollback()
-        logger.error(f"Error creating view '{sanitized_view}': {error}")
-        raise
+        log_error(e, "create_view", view_name=sanitized_view)
+        raise TableNotFoundError(f"Referenced table in view '{view_name}' does not exist: {e}") from e
+    except psycopg2.ProgrammingError as e:
+        connection.rollback()
+        log_error(e, "create_view", view_name=sanitized_view)
+        raise QuerySyntaxError(f"SQL syntax error in view definition: {e}") from e
+    except psycopg2.OperationalError as e:
+        connection.rollback()
+        log_error(e, "create_view", view_name=sanitized_view)
+        raise ConnectionError(f"Connection error while creating view '{view_name}': {e}") from e
+    except Exception as e:
+        connection.rollback()
+        log_error(e, "create_view", view_name=sanitized_view)
+        raise SonnixgresError(f"Unexpected error while creating view '{view_name}': {e}") from e
     finally:
         if close_connection:
             try:
@@ -538,7 +692,7 @@ def create_view(
                 pool.putconn(connection)
                 logger.debug("Database connection returned to pool")
             except Exception as e:
-                logger.error(f"Error returning connection to pool: {e}")
+                logger.warning(f"Error returning connection to pool: {e}")
 
 
 class MetadataCache:
@@ -565,6 +719,7 @@ class MetadataCache:
             logger.info("Metadata cache refreshed")
         except Exception as e:
             logger.error(f"Failed to refresh metadata cache: {e}")
+            raise SonnixgresError(f"Failed to refresh metadata cache: {e}") from e
 
     def retrieve_columns_info(self) -> Dict[str, Any]:
         """Retrieve column information from cache."""
@@ -578,8 +733,12 @@ class MetadataCache:
 
     def display_metadata(self):
         """Display cached metadata."""
-        columns_info = self.retrieve_columns_info()
-        for table, columns in columns_info.items():
-            print(f"Table: {table}")
-            print(f"Columns: {', '.join(columns)}")
-            print("-" * 50)
+        try:
+            columns_info = self.retrieve_columns_info()
+            for table, columns in columns_info.items():
+                print(f"Table: {table}")
+                print(f"Columns: {', '.join(columns)}")
+                print("-" * 50)
+        except Exception as e:
+            logger.error(f"Error displaying metadata: {e}")
+            raise SonnixgresError(f"Error displaying metadata: {e}") from e
