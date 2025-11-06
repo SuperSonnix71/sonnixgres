@@ -44,7 +44,8 @@ from .validation import (
     validate_table_name,
     validate_dataframe,
     validate_pagination_params,
-    validate_cache_params
+    validate_cache_params,
+    validate_view_query
 )
 from .utils import sanitize_sql_identifier, parse_table_list
 
@@ -786,8 +787,7 @@ def create_view(
     if not connection:
         raise ConnectionError("No database connection provided")
     validate_table_name(view_name)  # Views use same naming rules as tables
-    if not view_query or not view_query.strip():
-        raise ValidationError("View query cannot be empty")
+    validate_view_query(view_query)  # Validate view query for SQL injection
 
     # Check connection health
     connection = _reconnect_on_failure(connection)

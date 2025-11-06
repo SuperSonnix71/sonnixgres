@@ -267,7 +267,7 @@ def validate_view_query(view_query: str) -> None:
 
 def sanitize_sql_identifier(identifier: str) -> str:
     """
-    Sanitize SQL identifier to prevent injection.
+    Sanitize SQL identifier to prevent injection attacks.
 
     Args:
         identifier: Identifier to sanitize
@@ -276,28 +276,41 @@ def sanitize_sql_identifier(identifier: str) -> str:
         Sanitized identifier
 
     Raises:
-        ValidationError: If identifier is invalid
+        ValidationError: If identifier is invalid or contains dangerous patterns
     """
     if not identifier or not isinstance(identifier, str) or not identifier.strip():
         raise ValidationError("Identifier cannot be empty")
 
-    # Basic SQL identifier validation
-    if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_.]*$', identifier):
+    # Strengthened regex: no consecutive dots, must start with letter/underscore
+    # Allows: schema.table but not schema..table or .table
+    if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)*$', identifier):
         raise ValidationError(f"Invalid identifier: {identifier}. "
-                            "Identifiers must contain only letters, numbers, underscores, and dots, "
-                            "and must start with a letter or underscore.")
+                            "Identifiers must contain only letters, numbers, and underscores, "
+                            "with optional dot-separated schema qualifiers. "
+                            "Must start with a letter or underscore.")
 
-    # Check for SQL keywords
+    # Comprehensive SQL keywords list (case-insensitive check)
     sql_keywords = {
         'select', 'insert', 'update', 'delete', 'drop', 'create', 'alter',
         'table', 'column', 'database', 'schema', 'index', 'view', 'trigger',
         'function', 'procedure', 'begin', 'commit', 'rollback', 'union',
-        'join', 'where', 'having', 'limit', 'offset'
+        'join', 'where', 'having', 'limit', 'offset', 'group', 'order',
+        'by', 'from', 'into', 'values', 'set', 'truncate', 'exec', 'execute',
+        'grant', 'revoke', 'declare', 'cursor', 'fetch', 'open', 'close',
+        'deallocate', 'prepare', 'describe', 'explain', 'show', 'use',
+        'rename', 'replace', 'lock', 'unlock', 'merge', 'call', 'return',
+        'if', 'else', 'while', 'loop', 'end', 'case', 'when', 'then',
+        'exists', 'all', 'any', 'some', 'in', 'between', 'like', 'is',
+        'null', 'not', 'and', 'or', 'xor', 'distinct', 'as', 'on'
     }
 
-    identifier_lower = identifier.lower()
-    for keyword in sql_keywords:
-        if keyword in identifier_lower:
-            raise ValidationError(f"Identifier cannot contain SQL keyword: {keyword}")
+    # Split by dots and check each part individually (case-insensitive)
+    parts = identifier.split('.')
+    for part in parts:
+        part_lower = part.lower()
+        if part_lower in sql_keywords:
+            raise ValidationError(f"Identifier part '{part}' is a SQL keyword")
 
     return identifier
+
+
