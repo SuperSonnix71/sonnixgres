@@ -1,35 +1,38 @@
-DEFAULT_DISPLAY_LIMIT = 50
-VALID_LOG_LEVELS = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']
-DEFAULT_DB_PORT = 5432
+def populate_table(connection: connection, table_name: str, dataframe: pd.DataFrame) -> None:
+    if dataframe.empty:
+        raise ValueError("DataFrame cannot be empty")
 
+    sanitized_table = sanitize_sql_identifier(table_name)
 
-def _infer_postgresql_type(dtype: str, sample_values: Optional[List] = None) -> str:
-    """Infer PostgreSQL data type from pandas dtype and sample values."""
-    dtype = str(dtype).lower()
+    try:
+        with connection.cursor() as cursor:
+            # Infer appropriate PostgreSQL types for each column
+            for col in dataframe.columns:
+                sanitized_col = sanitize_sql_identifier(col)
+                # Get sample values for smarter type inference
+                sample_values = dataframe[col].dropna().head(10).tolist() if len(dataframe) > 0 else None
+                postgres_type = _infer_postgresql_type(str(dataframe[col].dtype), sample_values)
 
-    # Direct mappings for common pandas dtypes
-    if dtype == 'int64':
-        return 'BIGINT'
-    elif dtype == 'int32':
-        return 'INTEGER'
-    elif dtype == 'float64':
-        return 'DOUBLE PRECISION'
-    elif dtype == 'float32':
-        return 'REAL'
-    elif dtype == 'bool':
-        return 'BOOLEAN'
-    elif dtype.startswith('datetime'):
-        return 'TIMESTAMP'
-    elif dtype == 'object':
-        # For object columns, try to be smarter with sample values
-        if sample_values:
-            # Check if all values are strings of similar length (likely VARCHAR)
-            str_values = [str(v) for v in sample_values if v is not None][:10]  # Sample first 10
-            if str_values and all(len(str(v)) <= 255 for v in str_values):
-                return 'VARCHAR(255)'
-            elif str_values and all(len(str(v)) <= 1000 for v in str_values):
-                return 'VARCHAR(1000)'
-        return 'TEXT'
+                alter_query = "ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s %s"
+                cursor.execute(alter_query, (AsIs(sanitized_table), AsIs(sanitized_col), postgres_type))
 
-    # Default fallback
-    return 'TEXT'
+            columns = [sanitize_sql_identifier(col) for col in dataframe.columns]
+            insert_columns = ', '.join(columns)
+            placeholders = ', '.join(['%s'] * len(columns))
+            insert_query = f"INSERT INTO {AsIs(sanitized_table)} ({insert_columns}) VALUES ({placeholders})"
+
+            batch_size = 1000
+            data_values = dataframe.values.tolist()
+
+            for i in range(0, len(data_values), batch_size):
+                batch = data_values[i:i + batch_size]
+                cursor.executemany(insert_query, batch)
+
+            connection.commit()
+
+        logger.info(f"Inserted {len(dataframe)} rows into table '{sanitized_table}' with inferred column types")
+
+    except psycopg2.DatabaseError as e:
+        connection.rollback()
+        logger.error(f"Failed to populate table '{sanitized_table}': {e}")
+        raise
