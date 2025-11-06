@@ -1,5 +1,3 @@
-"""Core functionality for Sonnixgres PostgreSQL database interactions."""
-
 import os
 import logging
 import threading
@@ -12,37 +10,31 @@ from sqlalchemy import create_engine, MetaData, inspect
 from sqlalchemy.pool import QueuePool
 import pandas as pd
 import psycopg2
-from psycopg2.extensions import AsIs
+from psycopg2.extensions import AsIs, connection
 from rich.console import Console
 from rich.logging import RichHandler
 from rich.table import Table
 
 from .utils import sanitize_sql_identifier, validate_connection_params, validate_query_params, parse_table_list
 
-# Load environment variables
 load_dotenv()
 
-# Constants
 DEFAULT_DISPLAY_LIMIT = 50
 VALID_LOG_LEVELS = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']
 DEFAULT_DB_PORT = 5432
 
 
 class CustomRichHandler(RichHandler):
-    """Custom Rich handler for logging with magenta styling."""
-
     def __init__(self, console: Console = None, **kwargs):
         super().__init__(console=console, **kwargs)
         self.console = console or Console()
 
     def emit(self, record: logging.LogRecord) -> None:
-        """Emit a log record with magenta styling."""
         message = self.format(record)
         self.console.print(message, style="magenta")
 
 
 def _setup_logging() -> logging.Logger:
-    """Setup logging configuration."""
     log_level_str = os.getenv('LOG_LEVEL', 'INFO').upper()
 
     if log_level_str not in VALID_LOG_LEVELS:
@@ -50,7 +42,6 @@ def _setup_logging() -> logging.Logger:
 
     log_level = getattr(logging, log_level_str)
 
-    # Remove any existing handlers to avoid duplicates
     logger = logging.getLogger("sonnixgres")
     logger.handlers.clear()
 
@@ -60,19 +51,15 @@ def _setup_logging() -> logging.Logger:
     return logger
 
 
-# Global logger instance
 logger = _setup_logging()
 
 
 class ConnectionError(Exception):
-    """Exception raised when database connection fails."""
+    pass
 
 
 class PostgresCredentials:
-    """PostgreSQL database credentials loaded from environment variables."""
-
     def __init__(self) -> None:
-        """Initialize credentials from environment variables with validation."""
         self.host = os.getenv('DB_HOST')
         self.database = os.getenv('DB_DATABASE')
         self.user = os.getenv('DB_USER')
@@ -81,7 +68,6 @@ class PostgresCredentials:
         self.schema = os.getenv('DB_SCHEMA', '')
         self.tables = parse_table_list(os.getenv('DB_TABLES', ''))
 
-        # Validate required fields
         if not all([self.host, self.database, self.user, self.password]):
             raise ValueError("Missing required database credentials. Please check your .env file.")
 
@@ -90,12 +76,6 @@ class PostgresCredentials:
 
 @lru_cache(maxsize=1)
 def _get_sqlalchemy_engine() -> Any:
-    """
-    Get a cached SQLAlchemy engine with connection pooling.
-
-    Returns:
-        SQLAlchemy engine instance
-    """
     credentials = PostgresCredentials()
     db_url = f"postgresql+psycopg2://{credentials.user}:{credentials.password}@{credentials.host}:{credentials.port}/{credentials.database}"
 
@@ -104,21 +84,12 @@ def _get_sqlalchemy_engine() -> Any:
         poolclass=QueuePool,
         pool_size=5,
         max_overflow=10,
-        pool_pre_ping=True,  # Verify connections before use
+        pool_pre_ping=True,
         echo=False
     )
 
 
-def create_connection() -> psycopg2.connect:
-    """
-    Create a new PostgreSQL database connection.
-
-    Returns:
-        psycopg2 connection object
-
-    Raises:
-        ConnectionError: If connection fails
-    """
+def create_connection() -> connection:
     credentials = PostgresCredentials()
 
     try:
@@ -145,18 +116,14 @@ def create_connection() -> psycopg2.connect:
 
 @contextmanager
 def get_connection():
-    """
-    Context manager for database connections.
-
-    Yields:
-        psycopg2 connection object
-
-    Automatically closes connection on exit.
-    """
     connection = None
     try:
         connection = create_connection()
         yield connection
+    except Exception:
+        if connection:
+            connection.rollback()
+        raise
     finally:
         if connection:
             connection.close()
@@ -164,27 +131,11 @@ def get_connection():
 
 
 def query_database(
-    connection: psycopg2.connect,
+    connection: connection,
     query: str,
     params: Optional[tuple] = None,
     close_connection: bool = True
 ) -> pd.DataFrame:
-    """
-    Execute a SQL query and return results as a pandas DataFrame.
-
-    Args:
-        connection: Database connection object
-        query: SQL query string
-        params: Optional query parameters
-        close_connection: Whether to close connection after query
-
-    Returns:
-        Query results as pandas DataFrame
-
-    Raises:
-        ConnectionError: If connection is invalid
-        ValueError: If query parameters are invalid
-    """
     if not connection:
         raise ConnectionError("No database connection provided")
 
@@ -205,17 +156,6 @@ def query_database(
 
 
 def save_results_to_csv(dataframe: pd.DataFrame, filename: str) -> None:
-    """
-    Save a pandas DataFrame to a CSV file.
-
-    Args:
-        dataframe: DataFrame to save
-        filename: Output filename
-
-    Raises:
-        ValueError: If filename is invalid
-        IOError: If file cannot be written
-    """
     if not filename or not filename.strip():
         raise ValueError("Filename cannot be empty")
 
@@ -233,14 +173,6 @@ def display_results_as_table(
     max_column_width: int = 50,
     display_limit: int = DEFAULT_DISPLAY_LIMIT
 ) -> None:
-    """
-    Display a pandas DataFrame as a formatted table in the console.
-
-    Args:
-        dataframe: DataFrame to display
-        max_column_width: Maximum width for each column
-        display_limit: Maximum number of rows to display
-    """
     console = Console()
 
     if len(dataframe) > display_limit:
@@ -263,17 +195,7 @@ def display_results_as_table(
     console.print(table)
 
 
-def create_table(connection: psycopg2.connect, table_name: str) -> None:
-    """
-    Create a new table if it doesn't exist.
-
-    Args:
-        connection: Database connection
-        table_name: Name of the table to create
-
-    Raises:
-        ValueError: If table name is invalid
-    """
+def create_table(connection: connection, table_name: str) -> None:
     sanitized_table = sanitize_sql_identifier(table_name)
 
     try:
@@ -290,20 +212,7 @@ def create_table(connection: psycopg2.connect, table_name: str) -> None:
         raise
 
 
-def populate_table(connection: psycopg2.connect, table_name: str, dataframe: pd.DataFrame) -> None:
-    """
-    Populate a table with data from a pandas DataFrame.
-
-    Dynamically adds columns based on DataFrame structure.
-
-    Args:
-        connection: Database connection
-        table_name: Name of the table to populate
-        dataframe: DataFrame containing the data
-
-    Raises:
-        ValueError: If table name is invalid or DataFrame is empty
-    """
+def populate_table(connection: connection, table_name: str, dataframe: pd.DataFrame) -> None:
     if dataframe.empty:
         raise ValueError("DataFrame cannot be empty")
 
@@ -311,19 +220,23 @@ def populate_table(connection: psycopg2.connect, table_name: str, dataframe: pd.
 
     try:
         with connection.cursor() as cursor:
-            # Add columns dynamically based on DataFrame
             for col in dataframe.columns:
                 sanitized_col = sanitize_sql_identifier(col)
                 alter_query = "ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s TEXT"
                 cursor.execute(alter_query, (AsIs(sanitized_table), AsIs(sanitized_col)))
 
-            # Insert data
             columns = [sanitize_sql_identifier(col) for col in dataframe.columns]
             insert_columns = ', '.join(columns)
             placeholders = ', '.join(['%s'] * len(columns))
-            insert_query = f"INSERT INTO %s ({insert_columns}) VALUES ({placeholders})"
+            insert_query = f"INSERT INTO {AsIs(sanitized_table)} ({insert_columns}) VALUES ({placeholders})"
 
-            cursor.executemany(insert_query, (AsIs(sanitized_table),), dataframe.values.tolist())
+            batch_size = 1000
+            data_values = dataframe.values.tolist()
+
+            for i in range(0, len(data_values), batch_size):
+                batch = data_values[i:i + batch_size]
+                cursor.executemany(insert_query, batch)
+
             connection.commit()
 
         logger.info(f"Inserted {len(dataframe)} rows into table '{sanitized_table}'")
@@ -335,20 +248,11 @@ def populate_table(connection: psycopg2.connect, table_name: str, dataframe: pd.
 
 
 def update_records(
-    connection: psycopg2.connect,
+    connection: connection,
     update_query: str,
     params: Optional[tuple] = None,
     close_connection: bool = True
 ) -> None:
-    """
-    Update records in the database.
-
-    Args:
-        connection: Database connection
-        update_query: SQL UPDATE statement
-        params: Query parameters
-        close_connection: Whether to close connection after update
-    """
     if not connection:
         raise ConnectionError("No database connection provided")
 
@@ -372,20 +276,11 @@ def update_records(
 
 
 def create_view(
-    connection: psycopg2.connect,
+    connection: connection,
     view_name: str,
     view_query: str,
     close_connection: bool = True
 ) -> None:
-    """
-    Create or replace a database view.
-
-    Args:
-        connection: Database connection
-        view_name: Name of the view to create
-        view_query: SQL query for the view definition
-        close_connection: Whether to close connection after creation
-    """
     if not connection:
         raise ConnectionError("No database connection provided")
 
@@ -413,16 +308,7 @@ def create_view(
 
 
 class MetadataCache:
-    """Cache for database metadata with thread-safe operations."""
-
     def __init__(self, schema: str = "", tables: Optional[List[str]] = None) -> None:
-        """
-        Initialize metadata cache.
-
-        Args:
-            schema: Database schema name
-            tables: List of table names to cache
-        """
         self.schema = schema
         self.tables = [sanitize_sql_identifier(table) for table in (tables or [])]
         self.engine = _get_sqlalchemy_engine()
@@ -430,15 +316,15 @@ class MetadataCache:
         self._lock = threading.Lock()
 
     def refresh_metadata_cache(self) -> None:
-        """Refresh the metadata cache by reflecting database schema."""
         with self._lock:
             try:
                 metadata = MetaData()
                 for table in self.tables:
+                    schema_param = self.schema if self.schema else None
                     metadata.reflect(
                         bind=self.engine,
                         only=[table],
-                        schema=self.schema or None
+                        schema=schema_param
                     )
 
                 self.metadata_cache = metadata
@@ -449,12 +335,6 @@ class MetadataCache:
                 raise
 
     def retrieve_columns_info(self) -> Dict[str, List[str]]:
-        """
-        Retrieve column information for cached tables.
-
-        Returns:
-            Dictionary mapping table names to column info lists
-        """
         columns_info = {}
 
         with self._lock:
@@ -463,7 +343,7 @@ class MetadataCache:
 
                 for table_name in self.tables:
                     full_table_name = f"{self.schema}.{table_name}" if self.schema else table_name
-                    columns_detail = inspector.get_columns(table_name, schema=self.schema)
+                    columns_detail = inspector.get_columns(table_name, schema=self.schema or None)
                     columns = [f"{col['name']} ({col['type']})" for col in columns_detail]
 
                     logger.info(f"Columns in {full_table_name}: {', '.join(columns)}")
@@ -476,7 +356,6 @@ class MetadataCache:
         return columns_info
 
     def display_metadata(self) -> None:
-        """Display CREATE TABLE statements for cached metadata."""
         if not self.metadata_cache:
             logger.info("Metadata cache is empty. Call refresh_metadata_cache() first.")
             return
@@ -484,7 +363,6 @@ class MetadataCache:
         for table_name in self.metadata_cache.tables:
             table = self.metadata_cache.tables[table_name]
 
-            # Generate column definitions
             column_defs = []
             for column in table.columns:
                 sql_type = self._map_sqlalchemy_type(column.type)
@@ -498,7 +376,6 @@ class MetadataCache:
 
     @staticmethod
     def _map_sqlalchemy_type(sqlalchemy_type: Any) -> str:
-        """Map SQLAlchemy types to SQL type strings."""
         type_mapping = {
             'INTEGER': 'INT',
             'BIGINT': 'BIGINT',
