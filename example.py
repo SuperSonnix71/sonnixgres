@@ -1,46 +1,112 @@
-import pandas as pd
-from sonnixgres import create_connection, create_table, populate_table, display_results_as_table
+#!/usr/bin/env python3
+"""
+Example usage of the Sonnixgres library.
 
-# Create a dummy DataFrame
-def create_dummy_data(num_rows, suffix):
+This script demonstrates how to use Sonnixgres to interact with a PostgreSQL database.
+Make sure to set up your .env file with database credentials before running this example.
+"""
+
+import pandas as pd
+from sonnixgres import (
+    create_connection,
+    create_table,
+    populate_table,
+    display_results_as_table,
+    query_database,
+    get_connection,
+)
+
+
+def create_dummy_data(num_rows: int, suffix: str) -> pd.DataFrame:
+    """
+    Create a dummy DataFrame for testing.
+
+    Args:
+        num_rows: Number of rows to create
+        suffix: Suffix to append to data values
+
+    Returns:
+        DataFrame with dummy data
+    """
     return pd.DataFrame({
         'column1': [f'row{i}_data1_{suffix}' for i in range(1, num_rows + 1)],
         'column2': [f'row{i}_data2_{suffix}' for i in range(1, num_rows + 1)],
         'column3': [f'row{i}_data3_{suffix}' for i in range(1, num_rows + 1)]
     })
 
-# Create a connection to the database
-connection = create_connection()
 
-try:
+def main():
+    """Main example function demonstrating Sonnixgres usage."""
+    print("🚀 Sonnixgres Example")
+    print("=" * 50)
+
     # Test case 1: Create a new table and populate it with initial dummy data
+    print("\n📝 Test Case 1: Creating and populating table with initial data")
+
     dummy_data1 = create_dummy_data(3, 'initial')
-    create_table(connection, 'test_table_1')
-    populate_table(connection, 'test_table_1', dummy_data1)
 
-    # Test case 2: Attempt to create the same table and populate with different data
-    dummy_data2 = create_dummy_data(3, 'second')
-    create_table(connection, 'test_table_1')  # Should not create a new table
-    populate_table(connection, 'test_table_1', dummy_data2)
-
-    # Test case 3: Create a new table without populating, then populate in a separate step
-    create_table(connection, 'test_table_2')
-    dummy_data3 = create_dummy_data(3, 'separate')
-    populate_table(connection, 'test_table_2', dummy_data3)
-
-    # Test case 4: Try to populate a non-existent table (should fail)
-    dummy_data4 = create_dummy_data(3, 'nonexistent')
     try:
-        populate_table(connection, 'test_table_nonexistent', dummy_data4)
+        with get_connection() as connection:
+            create_table(connection, 'example_table_1')
+            populate_table(connection, 'example_table_1', dummy_data1)
+
+        print("✅ Successfully created and populated table 'example_table_1'")
+
     except Exception as e:
-        print(f"Expected error occurred when populating non-existent table: {e}")
+        print(f"❌ Error in test case 1: {e}")
+        return
 
-    # Display the populated data
-    display_results_as_table(dummy_data1, max_column_width=20)
+    # Test case 2: Query the data back
+    print("\n🔍 Test Case 2: Querying data from the table")
 
-finally:
-    # Close the database connection
-    if connection is not None:
-        connection.close()
+    try:
+        with get_connection() as connection:
+            df = query_database(connection, "SELECT * FROM example_table_1")
 
-    # Optional cleanup code can be added here to drop the test tables
+        print(f"📊 Retrieved {len(df)} rows from 'example_table_1'")
+        display_results_as_table(df, max_column_width=25)
+
+    except Exception as e:
+        print(f"❌ Error in test case 2: {e}")
+        return
+
+    # Test case 3: Create another table with different data
+    print("\n📝 Test Case 3: Creating another table with different data")
+
+    dummy_data2 = create_dummy_data(5, 'second')
+
+    try:
+        with get_connection() as connection:
+            create_table(connection, 'example_table_2')
+            populate_table(connection, 'example_table_2', dummy_data2)
+
+        print("✅ Successfully created and populated table 'example_table_2'")
+
+    except Exception as e:
+        print(f"❌ Error in test case 3: {e}")
+        return
+
+    # Test case 4: Demonstrate error handling
+    print("\n⚠️  Test Case 4: Error handling demonstration")
+
+    try:
+        # This should fail due to invalid table name
+        with get_connection() as connection:
+            create_table(connection, "invalid-table-name; DROP TABLE users;--")
+
+    except ValueError as e:
+        print(f"✅ Successfully caught validation error: {e}")
+
+    except Exception as e:
+        print(f"❌ Unexpected error: {e}")
+
+    print("\n🎉 Example completed successfully!")
+    print("\n💡 Tips:")
+    print("   - Check your .env file has correct database credentials")
+    print("   - Tables are created with auto-incrementing ID columns")
+    print("   - DataFrames are automatically converted to appropriate column types")
+    print("   - All database operations include proper error handling and logging")
+
+
+if __name__ == "__main__":
+    main()
