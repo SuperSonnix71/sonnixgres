@@ -8,13 +8,13 @@ A Python library for simplifying interactions with PostgreSQL databases, with ri
 
 ## Features
 
-- 🔒 **Secure**: Input validation and sanitization to prevent SQL injection
-- 🚀 **Fast**: Connection pooling with SQLAlchemy for optimal performance
-- 📊 **Rich Display**: Beautiful console tables with the Rich library
-- 🔧 **Easy Setup**: Environment-based configuration
-- 🧵 **Thread-Safe**: Proper locking for concurrent operations
-- 📝 **Type-Safe**: Full type hints throughout the codebase
-- 🧪 **Well-Tested**: Comprehensive test suite with 80%+ coverage
+- **Secure**: Input validation and sanitization to prevent SQL injection
+- **Fast**: Connection pooling with SQLAlchemy for optimal performance
+- **Rich Display**: Beautiful console tables with the Rich library
+- **Easy Setup**: Environment-based configuration
+- **Thread-Safe**: Proper locking for concurrent operations
+- **Type-Safe**: Full type hints throughout the codebase
+- **Well-Tested**: Comprehensive test suite with 80%+ coverage
 
 ## Installation
 
