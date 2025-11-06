@@ -6,15 +6,18 @@
 
 A Python library for simplifying interactions with PostgreSQL databases, with rich console output for better readability and debugging.
 
+## ⚠️ Development Status
+
+**This library is currently in active development and not yet production-ready.** Core functionality is incomplete, and the API may change significantly. See [Issues](https://github.com/SuperSonnix71/sonnixgres/issues) for current development status.
+
 ## Features
 
 - **Secure**: Input validation and sanitization to prevent SQL injection
-- **Fast**: Connection pooling with SQLAlchemy for optimal performance
 - **Rich Display**: Beautiful console tables with the Rich library
 - **Easy Setup**: Environment-based configuration
-- **Thread-Safe**: Proper locking for concurrent operations
-- **Type-Safe**: Full type hints throughout the codebase
-- **Well-Tested**: Comprehensive test suite with 80%+ coverage
+- **Type-Safe**: Type hints throughout the codebase (in progress)
+
+*Note: Advanced features like connection pooling, metadata caching, and comprehensive testing are planned but not yet implemented.*
 
 ## Installation
 
@@ -43,8 +46,6 @@ DB_DATABASE=your_database_name
 DB_USER=your_database_username
 DB_PASSWORD=your_database_password
 DB_PORT=5432
-DB_SCHEMA=your_schema
-DB_TABLES=table1,table2,table3
 
 # Optional: Logging level
 LOG_LEVEL=INFO
@@ -57,12 +58,16 @@ from sonnixgres import create_connection, query_database, display_results_as_tab
 import pandas as pd
 
 # Create a connection (automatically uses your .env config)
-with create_connection() as conn:
+conn = create_connection()
+
+try:
     # Query data
     df = query_database(conn, "SELECT * FROM users WHERE active = %s", (True,))
 
     # Display results beautifully
     display_results_as_table(df)
+finally:
+    conn.close()
 ```
 
 ## API Reference
@@ -75,20 +80,9 @@ Creates a new PostgreSQL database connection using environment variables.
 ```python
 from sonnixgres import create_connection
 
-with create_connection() as conn:
-    # Use connection
-    pass
-```
-
-#### `get_connection() -> ContextManager[psycopg2.connect]`
-Context manager for database connections with automatic cleanup.
-
-```python
-from sonnixgres import get_connection
-
-with get_connection() as conn:
-    # Connection automatically closed on exit
-    pass
+conn = create_connection()
+# Remember to close the connection when done
+conn.close()
 ```
 
 ### Data Operations
@@ -157,20 +151,6 @@ create_view(
 )
 ```
 
-### Metadata Operations
-
-#### `MetadataCache(schema="", tables=None)`
-Cache for database metadata with thread-safe operations.
-
-```python
-from sonnixgres import MetadataCache
-
-cache = MetadataCache(schema="public", tables=["users", "products"])
-cache.refresh_metadata_cache()
-columns_info = cache.retrieve_columns_info()
-cache.display_metadata()
-```
-
 ## Security
 
 Sonnixgres takes security seriously:
@@ -178,7 +158,8 @@ Sonnixgres takes security seriously:
 - **Input Validation**: All table names, column names, and identifiers are validated and sanitized
 - **Parameterized Queries**: SQL injection prevention through proper parameterization
 - **Credential Protection**: Never commit database credentials to version control
-- **Connection Security**: Uses connection pooling and proper cleanup
+
+*Note: Security features are still under development. See [Security Issues](https://github.com/SuperSonnix71/sonnixgres/issues?q=is%3Aissue+is%3Aopen+label%3Asecurity) for current status.*
 
 ## Development
 
@@ -203,7 +184,7 @@ poetry run mypy .
 
 ### Testing
 
-The test suite uses pytest with comprehensive mocking:
+The test suite uses pytest with mocking for isolated testing:
 
 ```bash
 # Run all tests
@@ -215,6 +196,8 @@ pytest --cov=sonnixgres --cov-report=html
 # Run specific test file
 pytest tests/test_core.py
 ```
+
+*Note: Tests currently use mocking due to incomplete implementations. Integration tests with real databases are planned.*
 
 ### Code Quality
 
@@ -229,39 +212,33 @@ This project uses:
 
 ### Environment Variables
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `DB_HOST` | Database host | Required |
-| `DB_DATABASE` | Database name | Required |
-| `DB_USER` | Database username | Required |
-| `DB_PASSWORD` | Database password | Required |
-| `DB_PORT` | Database port | `5432` |
-| `DB_SCHEMA` | Database schema | `""` |
-| `DB_TABLES` | Comma-separated table list | `""` |
-| `LOG_LEVEL` | Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL) | `INFO` |
-
-### Connection Pooling
-
-Sonnixgres uses SQLAlchemy's QueuePool for connection management:
-- Pool size: 5 connections
-- Max overflow: 10 connections
-- Connection pre-ping: Enabled
+| Variable | Description | Default | Required |
+|----------|-------------|---------|----------|
+| `DB_HOST` | Database host | - | Yes |
+| `DB_DATABASE` | Database name | - | Yes |
+| `DB_USER` | Database username | - | Yes |
+| `DB_PASSWORD` | Database password | - | Yes |
+| `DB_PORT` | Database port | `5432` | No |
+| `LOG_LEVEL` | Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL) | `INFO` | No |
 
 ## Error Handling
 
-Sonnixgres provides clear error messages and proper exception handling:
+Sonnixgres provides basic error handling:
 
 ```python
-from sonnixgres import ConnectionError
+from sonnixgres import create_connection
 
 try:
-    with create_connection() as conn:
-        df = query_database(conn, "SELECT * FROM invalid_table")
-except ConnectionError as e:
-    print(f"Connection failed: {e}")
-except ValueError as e:
-    print(f"Invalid input: {e}")
+    conn = create_connection()
+    df = query_database(conn, "SELECT * FROM invalid_table")
+except Exception as e:
+    print(f"Database operation failed: {e}")
+finally:
+    if 'conn' in locals():
+        conn.close()
 ```
+
+*Note: Comprehensive error handling and custom exceptions are still under development.*
 
 ## Contributing
 
@@ -274,6 +251,20 @@ Contributions are welcome! Please:
 5. Update documentation
 6. Submit a pull request
 
+## Troubleshooting
+
+### Common Issues
+
+1. **ImportError**: Make sure all dependencies are installed: `pip install -r requirements.txt`
+2. **Connection Failed**: Verify your `.env` file has correct database credentials
+3. **Function Not Found**: Some advertised features are not yet implemented (see Issues)
+
+### Getting Help
+
+- Check [Issues](https://github.com/SuperSonnix71/sonnixgres/issues) for known problems
+- Create a new issue for bugs or feature requests
+- Review the development status before expecting advanced features
+
 ## License
 
 **BSD 3-Clause License**
@@ -285,17 +276,14 @@ See [LICENSE](LICENSE) for details.
 
 ## Changelog
 
-### v0.2.0 (Current)
-- Complete security overhaul with input validation
-- Connection pooling implementation
-- Comprehensive type hints
-- Thread-safe metadata caching
-- Improved error handling
-- Enhanced test suite
-- Better documentation
+### v0.2.0 (Development)
+- Basic PostgreSQL operations
+- Input validation and sanitization
+- Rich console output
+- Environment-based configuration
+- Type hints (in progress)
 
-### v0.1.5
-- Initial release
+### v0.1.5 (Initial Release)
 - Basic PostgreSQL operations
 - Rich console output
 - Environment-based configuration
