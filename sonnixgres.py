@@ -1,6 +1,7 @@
 import os
 import logging
 import warnings
+import re
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, MetaData, inspect
 import pandas as pd
@@ -13,6 +14,32 @@ import threading
 import pickle
 # Load environment variables
 load_dotenv()
+
+
+def sanitize_sql_identifier(identifier: str) -> str:
+    """Sanitize SQL identifiers to prevent SQL injection attacks."""
+    if not identifier:
+        raise ValueError("Identifier cannot be empty")
+
+    if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_.]*$', identifier):
+        raise ValueError(f"Invalid identifier: {identifier}. "
+                        "Identifiers must contain only letters, numbers, underscores, and dots, "
+                        "and must start with a letter or underscore.")
+
+    sql_keywords = {
+        'select', 'insert', 'update', 'delete', 'drop', 'create', 'alter',
+        'table', 'column', 'database', 'schema', 'index', 'view', 'trigger',
+        'function', 'procedure', 'begin', 'commit', 'rollback', 'union',
+        'join', 'where', 'having', 'limit', 'offset'
+    }
+
+    identifier_lower = identifier.lower()
+    for keyword in sql_keywords:
+        if keyword in identifier_lower:
+            raise ValueError(f"Identifier cannot contain SQL keyword: {keyword}")
+
+    return identifier
+
 
 class CustomRichHandler(RichHandler):
     def __init__(self, console: Console = None, **kwargs):
@@ -49,7 +76,7 @@ class PostgresCredentials:
         self.port = int(os.getenv('DB_PORT', 5432))
         self.schema = os.getenv('DB_SCHEMA', '')
         self.tables = os.getenv('DB_TABLES', '').split(',')
-        
+
 def create_sqlalchemy_engine():
     credentials = PostgresCredentials()
     db_url = f"postgresql+psycopg2://{credentials.user}:{credentials.password}@{credentials.host}:{credentials.port}/{credentials.database}"
@@ -96,13 +123,13 @@ class MetadataCache:
                 metadata = MetaData()
                 for table in self.tables:
                     metadata.reflect(bind=self.engine, only=[table], schema=self.schema)
-                
+
                 self.metadata_cache = metadata
                 logger.info("Metadata cache refreshed.")
 
             except Exception as e:
                 logger.error(f"Error refreshing metadata cache: {e}")
-                
+
     def retrieve_columns_info(self):
         columns_info = {}  # Use a dictionary to structure information by table
         with self.lock:
@@ -128,9 +155,10 @@ class MetadataCache:
             table = self.metadata_cache.tables[table_name]
             column_definitions = [self.format_column_details(column) for column in table.columns]
             create_table_statement = f"CREATE TABLE {table_name} (\n    " + ",\n    ".join(column_definitions) + "\n);"
-            logger.info(create_table_statement)      
-        
-        
+            logger.info(create_table_statement)
+
+
+
 
 class ConnectionError(Exception):
     """Exception raised when connection to database fails."""
@@ -159,7 +187,7 @@ def create_connection() -> psycopg2.connect:
     credentials = PostgresCredentials()
     return _get_connection(credentials)
 
-def query_database(connection: psycopg2.connect, query: str, 
+def query_database(connection: psycopg2.connect, query: str,
                    params: tuple | None = None, close_connection: bool = True) -> pd.DataFrame:
     if not connection:
         raise ConnectionError("No connection to database.")
@@ -204,45 +232,52 @@ def display_results_as_table(dataframe: pd.DataFrame, max_column_width: int = 50
         table.add_row(*[str(item) for item in row])
 
     console.print(table)
-    
+
 
 
 def create_table(connection, table_name):
     """Create a new table if it does not exist."""
+    # SECURITY FIX: Sanitize table name to prevent SQL injection
+    sanitized_table = sanitize_sql_identifier(table_name)
+
     try:
         cursor = connection.cursor()
-        create_table_query = f"CREATE TABLE IF NOT EXISTS {AsIs(table_name)} ();"
+        create_table_query = f"CREATE TABLE IF NOT EXISTS {AsIs(sanitized_table)} ();"
         cursor.execute(create_table_query)
         connection.commit()
         cursor.close()
-        logger.info(f"Table '{table_name}' created successfully.")
+        logger.info(f"Table '{sanitized_table}' created successfully.")
     except (Exception, psycopg2.DatabaseError) as error:
         logger.error(f"Error in creating table: {error}")
         raise
 
 def populate_table(connection, table_name, dataframe):
     """Populate the table with data from a DataFrame."""
+    # SECURITY FIX: Sanitize table name and column names to prevent SQL injection
+    sanitized_table = sanitize_sql_identifier(table_name)
+    sanitized_columns = [sanitize_sql_identifier(col) for col in dataframe.columns]
+
     try:
         cursor = connection.cursor()
 
         # Add columns based on DataFrame, one at a time
-        for col in dataframe.columns:
-            alter_table_query = f"ALTER TABLE {AsIs(table_name)} ADD COLUMN IF NOT EXISTS {col} TEXT;"
+        for col in sanitized_columns:
+            alter_table_query = f"ALTER TABLE {AsIs(sanitized_table)} ADD COLUMN IF NOT EXISTS {AsIs(col)} TEXT;"
             cursor.execute(alter_table_query)
 
         # Insert data
-        insert_columns = ', '.join(dataframe.columns)
-        insert_values = ', '.join(['%s'] * len(dataframe.columns))
-        insert_query = f"INSERT INTO {AsIs(table_name)} ({insert_columns}) VALUES ({insert_values})"
+        insert_columns = ', '.join(sanitized_columns)
+        insert_values = ', '.join(['%s'] * len(sanitized_columns))
+        insert_query = f"INSERT INTO {AsIs(sanitized_table)} ({insert_columns}) VALUES ({insert_values})"
         cursor.executemany(insert_query, dataframe.values.tolist())
         connection.commit()
         cursor.close()
-        logger.info(f"Data inserted into table '{table_name}' successfully.")
+        logger.info(f"Data inserted into table '{sanitized_table}' successfully.")
     except (Exception, psycopg2.DatabaseError) as error:
         logger.error(f"Error in populating table: {error}")
         raise
 
-def update_records(connection: psycopg2.connect, update_query: str, 
+def update_records(connection: psycopg2.connect, update_query: str,
                    params: tuple | None = None, close_connection: bool = True) -> None:
     if not connection:
         raise ConnectionError("No connection to database.")
@@ -261,20 +296,23 @@ def update_records(connection: psycopg2.connect, update_query: str,
             connection.close()
             logger.info("Database connection closed.")
 
-def create_view(connection: psycopg2.connect, view_name: str, view_query: str, 
+def create_view(connection: psycopg2.connect, view_name: str, view_query: str,
                 close_connection: bool = True) -> None:
     if not connection:
-        raise ConnectionError("No connection to database.")
+        raise ConnectionError("No database connection provided.")
+
+    # SECURITY FIX: Sanitize view name to prevent SQL injection
+    sanitized_view = sanitize_sql_identifier(view_name)
 
     try:
         with connection.cursor() as cursor:
-            create_view_query = f"CREATE OR REPLACE VIEW {AsIs(view_name)} AS {view_query}"
+            create_view_query = f"CREATE OR REPLACE VIEW {AsIs(sanitized_view)} AS {view_query}"
             cursor.execute(create_view_query)
             connection.commit()
-            logger.info(f"View '{view_name}' created successfully.")
+            logger.info(f"View '{sanitized_view}' created successfully.")
     except (Exception, psycopg2.DatabaseError) as error:
         connection.rollback()
-        logger.error(f"Error creating view '{view_name}': {error}")
+        logger.error(f"Error creating view '{sanitized_view}': {error}")
         raise
     finally:
         if close_connection:
