@@ -5,8 +5,9 @@ Sonnixgres Core Module - High-performance PostgreSQL operations with connection 
 import os
 import time
 import logging
-from typing import Optional, Union, Dict, Any, Iterator
+from typing import Optional, Union, Dict, Any, Iterator, Callable
 from contextlib import contextmanager
+from functools import wraps
 import threading
 
 import pandas as pd
@@ -70,6 +71,86 @@ DTYPE_TO_SQL = {
     'datetime64[ns]': 'TIMESTAMP',
     'string': 'TEXT'
 }
+
+
+def retry_on_failure(max_retries: int = 3, backoff_factor: float = 1.5,
+                    retryable_exceptions: tuple = (ConnectionError, psycopg2.OperationalError)):
+    """
+    Decorator to retry operations on failure with exponential backoff.
+
+    Args:
+        max_retries: Maximum number of retry attempts
+        backoff_factor: Exponential backoff multiplier
+        retryable_exceptions: Tuple of exceptions that should trigger retry
+    """
+    def decorator(func: Callable) -> Callable:
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            last_exception = None
+            for attempt in range(max_retries + 1):
+                try:
+                    return func(*args, **kwargs)
+                except retryable_exceptions as e:
+                    last_exception = e
+                    if attempt < max_retries:
+                        wait_time = backoff_factor ** attempt
+                        logger.warning(f"Attempt {attempt + 1} failed for {func.__name__}, "
+                                     f"retrying in {wait_time:.1f}s: {e}")
+                        time.sleep(wait_time)
+                    else:
+                        logger.error(f"All {max_retries + 1} attempts failed for {func.__name__}: {e}")
+                        raise
+            # This should never be reached, but just in case
+            raise last_exception
+        return wrapper
+    return decorator
+
+
+def check_connection_health(connection) -> bool:
+    """
+    Check if a database connection is healthy.
+
+    Args:
+        connection: Database connection to check
+
+    Returns:
+        True if connection is healthy, False otherwise
+    """
+    if not connection:
+        return False
+
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 1")
+        return True
+    except Exception as e:
+        logger.warning(f"Connection health check failed: {e}")
+        return False
+
+
+def _reconnect_on_failure(connection):
+    """
+    Attempt to reconnect if connection is unhealthy.
+
+    Args:
+        connection: Connection to check and potentially replace
+
+    Returns:
+        Healthy connection (original or new)
+    """
+    if not check_connection_health(connection):
+        logger.warning("Connection is unhealthy, attempting to reconnect")
+        try:
+            # Return the old connection to pool
+            pool = _get_connection_pool()
+            pool.putconn(connection)
+
+            # Get a new connection
+            return create_connection()
+        except Exception as e:
+            logger.error(f"Failed to reconnect: {e}")
+            raise ConnectionError("Failed to establish healthy connection") from e
+    return connection
 
 
 class PostgresCredentials:
@@ -170,6 +251,7 @@ class QueryCache:
 _query_cache = QueryCache()
 
 
+@retry_on_failure(max_retries=2, retryable_exceptions=(ConnectionError, psycopg2.OperationalError))
 def create_connection():
     """
     Create a new PostgreSQL database connection using environment variables.
@@ -270,6 +352,9 @@ def query_database(
     if use_cache:
         validate_cache_params(use_cache, cache_ttl)
 
+    # Check connection health
+    connection = _reconnect_on_failure(connection)
+
     # Modify query for pagination if requested
     original_query = query
     if limit is not None or offset is not None:
@@ -352,6 +437,9 @@ def query_database_streaming(
     if not connection:
         raise ConnectionError("No database connection provided")
     validate_query_params(query, params)
+
+    # Check connection health
+    connection = _reconnect_on_failure(connection)
 
     try:
         with connection.cursor() as cursor:
@@ -471,6 +559,7 @@ def _infer_sql_type(dtype: str) -> str:
     return DTYPE_TO_SQL.get(dtype, 'TEXT')
 
 
+@retry_on_failure(max_retries=1, retryable_exceptions=(ConnectionError, psycopg2.OperationalError))
 def create_table(connection, table_name: str) -> None:
     """
     Create a new table with optimized structure.
@@ -483,6 +572,9 @@ def create_table(connection, table_name: str) -> None:
 
     # Validate inputs
     validate_table_name(table_name)
+
+    # Check connection health
+    connection = _reconnect_on_failure(connection)
 
     sanitized_table = sanitize_sql_identifier(table_name)
 
@@ -511,6 +603,7 @@ def create_table(connection, table_name: str) -> None:
         raise SonnixgresError(f"Unexpected error creating table: {e}") from e
 
 
+@retry_on_failure(max_retries=1, retryable_exceptions=(ConnectionError, psycopg2.OperationalError))
 def populate_table(connection, table_name: str, dataframe: pd.DataFrame) -> None:
     """
     Populate a table with data from a DataFrame using optimized data types.
@@ -525,6 +618,9 @@ def populate_table(connection, table_name: str, dataframe: pd.DataFrame) -> None
     # Validate inputs
     validate_table_name(table_name)
     validate_dataframe(dataframe, "populate_table")
+
+    # Check connection health
+    connection = _reconnect_on_failure(connection)
 
     sanitized_table = sanitize_sql_identifier(table_name)
     sanitized_columns = [sanitize_sql_identifier(col) for col in dataframe.columns]
@@ -576,6 +672,7 @@ def populate_table(connection, table_name: str, dataframe: pd.DataFrame) -> None
         raise SonnixgresError(f"Unexpected error populating table: {e}") from e
 
 
+@retry_on_failure(max_retries=1, retryable_exceptions=(ConnectionError, psycopg2.OperationalError))
 def update_records(
     connection,
     update_query: str,
@@ -597,6 +694,9 @@ def update_records(
     if not connection:
         raise ConnectionError("No connection to database")
     validate_query_params(update_query, params)
+
+    # Check connection health
+    connection = _reconnect_on_failure(connection)
 
     try:
         with connection.cursor() as cursor:
@@ -632,6 +732,7 @@ def update_records(
                 logger.warning(f"Error returning connection to pool: {e}")
 
 
+@retry_on_failure(max_retries=1, retryable_exceptions=(ConnectionError, psycopg2.OperationalError))
 def create_view(
     connection,
     view_name: str,
@@ -655,6 +756,9 @@ def create_view(
     validate_table_name(view_name)  # Views use same naming rules as tables
     if not view_query or not view_query.strip():
         raise ValidationError("View query cannot be empty")
+
+    # Check connection health
+    connection = _reconnect_on_failure(connection)
 
     sanitized_view = sanitize_sql_identifier(view_name)
 
