@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "sonnixgres"
 version = "0.2.0"
-description = "A Python library for PostgreSQL database interactions with rich console output. Currently in development - core features incomplete."
+description = "A production-ready Python library for PostgreSQL database interactions with connection pooling, query caching, and rich console output."
 authors = ["Sonny Mir <sonnym@hotmail.se>"]
 license = "BSD-3-Clause"
 readme = "README.md"
