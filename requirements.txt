@@ -92,3 +92,4 @@ wcwidth==0.2.13
 websockets @ file:///home/conda/feedstock_root/build_artifacts/websockets_1695409920435/work
 wheel==0.42.0
 zipp @ file:///home/conda/feedstock_root/build_artifacts/zipp_1695255097490/work
+pytest-cov==4.1.0
